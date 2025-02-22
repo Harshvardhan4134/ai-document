@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Documents</title>
+    <style>
+        .document {
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>Documents</h1>
+    <div id="documents">
+        {% for document in documents %}
+            <div class="document">
+                <h3>{{ document.filename }}</h3>
+                <a href="/view_document/{{ document.filename }}" target="_blank">View Document</a>
+            </div>
+        {% endfor %}
+    </div>
+</body>
+</html>

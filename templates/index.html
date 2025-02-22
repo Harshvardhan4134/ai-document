@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document Library</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        .folder {
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin: 10px 0;
+        }
+        .drop-zone {
+            border: 2px dashed #ccc;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+        }
+        .drop-zone.dragover {
+            border-color: #000;
+            background-color: #f0f0f0;
+        }
+        #file-list, #chat {
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Document Library</h1>
+    <div id="folder-section">
+        <h2>Folders</h2>
+        <div id="folders">
+            <!-- Folders will be dynamically added here -->
+        </div>
+        <input type="text" id="folder-name" placeholder="New folder name">
+        <button onclick="createFolder()">Create Folder</button>
+    </div>
+
+    <div id="upload-section">
+        <h2>Upload Documents</h2>
+        <div class="drop-zone" id="drop-zone">
+            <p>Drag and drop files here or click to upload</p>
+            <input type="file" id="file-input" multiple style="display: none;">
+        </div>
+        <div id="file-list"></div>
+    </div>
+
+    <div id="chat-section">
+        <h2>Ask a Question</h2>
+        <input type="text" id="question-input" placeholder="Ask a question">
+        <button id="ask-button">Ask</button>
+        <div id="answer"></div>
+    </div>
+    <div id="summaries">
+        <h2>Document Summaries</h2>
+        <!-- Summaries will be dynamically added here -->
+    </div>
+    
+    <script>
+        // Function to handle file uploads and display summaries
+        function handleFiles(files) {
+            if (files.length === 0) return;
+    
+            const fileList = document.getElementById('file-list');
+            fileList.innerHTML = '';
+            const formData = new FormData();
+            for (const file of files) {
+                formData.append('files', file);
+                const fileItem = document.createElement('div');
+                fileItem.className = 'file-item';
+                fileItem.textContent = file.name;
+                fileList.appendChild(fileItem);
+            }
+    
+            fetch('/upload', {
+                method: 'POST',
+                body: formData,
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.message) {
+                    alert(data.message);
+                    // Display summaries
+                    const summariesDiv = document.getElementById('summaries');
+                    summariesDiv.innerHTML = '<h2>Document Summaries</h2>';
+                    data.summaries.forEach(summary => {
+                        const summaryItem = document.createElement('div');
+                        summaryItem.className = 'summary-item';
+                        summaryItem.innerHTML = `
+                            <strong>${summary.filename}:</strong><br>
+                            ${summary.summary}
+                        `;
+                        summariesDiv.appendChild(summaryItem);
+                    });
+                } else if (data.error) {
+                    alert(data.error);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('An error occurred while uploading files.');
+            });
+        }
+    
+        // Function to create a folder
+        function createFolder() {
+            const folderName = document.getElementById('folder-name').value;
+            if (!folderName) {
+                alert("Folder name is required");
+                return;
+            }
+            fetch('/create_folder', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ folder_name: folderName }),
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.message) {
+                    alert(data.message);
+                    location.reload(); // Refresh the page to show the new folder
+                } else if (data.error) {
+                    alert(data.error);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+        }
+    
+        // Drag-and-drop functionality
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+    
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+    
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+    
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            handleFiles(files);
+        });
+    
+        fileInput.addEventListener('change', (e) => {
+            const files = e.target.files;
+            handleFiles(files);
+        });
+    
+        dropZone.addEventListener('click', () => {
+            fileInput.click();
+        });
+    
+        // Chat functionality to ask questions
+        document.getElementById('ask-button').addEventListener('click', () => {
+    const question = document.getElementById('question-input').value;
+    if (!question) {
+        alert("Please enter a question.");
+        return;
+    }
+
+    fetch('/ask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question }),
+    })
+    .then(response => response.json())
+    .then(data => {
+        const answerDiv = document.getElementById('answer');
+        if (data.answer) {
+            answerDiv.textContent = `Answer: ${data.answer}`;
+        } else if (data.error) {
+            answerDiv.textContent = `Error: ${data.error}`;
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('An error occurred while asking the question.');
+    });
+});
+    </script>
+</body>
+</html>
