@@ -1,4 +1,5 @@
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, redirect, url_for, session
+from flask_session import Session
 import os
 import json
 from datetime import datetime
@@ -7,35 +8,55 @@ from extract_text import extract_text_from_pdf, extract_text_from_xlsx, extract_
 from openai_utils import generate_embeddings, generate_summary, answer_question
 import pinecone
 from pinecone import Pinecone, ServerlessSpec
-from database import create_folder
-from datetime import timedelta
-from flask_jwt_extended import JWTManager, create_access_token
-
+import psycopg2
+import config  # Ensure `config.py` has correct DB credentials
 
 app = Flask(__name__)
+
+# ✅ Flask Session Configuration
+app.secret_key = "your_secret_key_here"
+app.config['SESSION_TYPE'] = 'filesystem'
+Session(app)
+
+# ✅ File Upload Config
 app.config['UPLOAD_FOLDER'] = 'uploads/'
 app.config['PROCESSED_JSON'] = 'processed_data.json'
 app.config['ALLOWED_EXTENSIONS'] = {'pdf', 'docx', 'xlsx', 'txt', 'json'}
-
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
- #Dummy users (Replace with DB storage later)
-jwt = JWTManager(app)  # ✅ This must be inside your app
+# ✅ Connect to PostgreSQL
+try:
+    conn = psycopg2.connect(
+        host=config.DB_HOST,
+        dbname=config.DB_NAME,
+        user=config.DB_USER,
+        password=config.DB_PASSWORD
+    )
+    conn.autocommit = True  
+    cursor = conn.cursor()
+    print("✅ Database connected successfully!")
+except Exception as e:
+    print(f"❌ Database connection failed: {e}")
+    exit(1)
 
-USERS = {
-    "admin": {"password": "admin123", "role": "admin"},
-    "user": {"password": "user123", "role": "user"}
-}
+# ✅ Ensure users table exists
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        username VARCHAR(50) UNIQUE NOT NULL,
+        password TEXT NOT NULL
+    )
+""")
 
-# Initialize Pinecone
-pinecone_api_key = "YOUR_PINECONEAPI_KEY"
+# ✅ Initialize Pinecone
+pinecone_api_key = "pcsk_JcF8a_DLvNLFhfUk7GrVkiV6ueX9xKbxr9vW8nLij5q8fpD1ZM2VABtLtiWvLTCd3RbFP"
 index_name = "document-embeddings"
-
 pc = Pinecone(api_key=pinecone_api_key)
+
 if index_name not in pc.list_indexes().names():
     pc.create_index(
         name=index_name,
-        dimension=1536,  # OpenAI embedding dimension
+        dimension=1536,
         metric="cosine",
         spec=ServerlessSpec(cloud="aws", region="us-east-1")
     )
@@ -43,50 +64,79 @@ if index_name not in pc.list_indexes().names():
 index = pc.Index(index_name)
 print(f"✅ Pinecone index '{index_name}' initialized successfully!")
 
+# ✅ Helper Function: Check allowed file types
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
-# 🔹 User Login (Returns JWT Token)
-@app.route('/login', methods=['POST'])
+@app.before_request
+def require_login():
+    allowed_routes = ['login', 'static']  # Allow login page & static files
+    if "user" not in session and request.endpoint not in allowed_routes:
+        return redirect(url_for('login'))
+
+
+# ✅ Login Route
+@app.route('/login', methods=['GET', 'POST'])
 def login():
-    data = request.json
-    username = data.get("username")
-    password = data.get("password")
+    if request.method == 'POST':
+        username = request.form.get("username")
+        password = request.form.get("password")
 
-    if username in USERS and USERS[username]["password"] == password:
-        user_role = USERS[username]["role"]
-        access_token = create_access_token(identity={"username": username, "role": user_role}, expires_delta=timedelta(hours=1))
-        return jsonify({"access_token": access_token, "role": user_role}), 200
-    else:
-        return jsonify({"error": "Invalid username or password"}), 401
+        print(f"🔹 Received login request for: {username}")
 
-# 🔹 Serve Login Page (New!)
-@app.route('/login_page')
-def login_page():
-    return render_template("login.html")
+        cursor.execute("ROLLBACK")  # Prevent transaction errors
+        cursor.execute("SELECT password FROM users WHERE username = %s", (username,))
+        user = cursor.fetchone()
+        print(f"🔹 Database returned: {user}")  # ✅ Debug print
 
+        if user:
+            db_password = user[0]
+            if password == db_password:
+                print(f"✅ Login successful for {username}")
+                session["user"] = username
+                return redirect(url_for("index_page"))
+            else:
+                print(f"❌ Wrong password for {username}")
+                return render_template("login.html", error="Invalid username or password")
+        else:
+            print(f"❌ User not found: {username}")
+            return render_template("login.html", error="Invalid username or password")
+
+    return render_template("login.html")  
+
+
+
+# ✅ Logout Route
+@app.route('/logout')
+def logout():
+    session.pop("user", None)  
+    return redirect(url_for("login"))  
+
+# ✅ Home Page (Redirects to login if not authenticated)
 @app.route('/')
 def index_page():
+    if "user" not in session:  
+        print("❌ User not logged in. Redirecting to login...")
+        return redirect(url_for('login'))  # ✅ Fix: Redirects to `/login`
     return render_template('index.html')
 
-@app.route('/create_folder', methods=['POST'])
-def create_folder_route():
-    folder_name = request.json.get('folder_name')
-    if not folder_name:
-        return jsonify({"error": "Folder name is required"}), 400
-    create_folder(folder_name)
-    return jsonify({"message": f"Folder '{folder_name}' created successfully"}), 200
 
+# ✅ Upload Route (Protected)
 @app.route('/upload', methods=['POST'])
 def upload_file():
+    if "user" not in session:
+        return jsonify({"error": "Unauthorized access. Please log in."}), 403
+
     try:
         if 'files' not in request.files:
             return jsonify({"error": "No files provided"}), 400
 
         files = request.files.getlist('files')
-        uploaded_files = []
-        summaries = []
-        json_data = []
+        uploaded_files, summaries, json_data = [], [], []
+
+        # ✅ Clear existing Pinecone index before adding new files
+        index.delete(delete_all=True)
+        print("✅ Old embeddings deleted. Index refreshed.")
 
         for file in files:
             if file.filename == '':
@@ -96,7 +146,6 @@ def upload_file():
                 filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
                 file.save(filepath)
 
-                # Extract text based on file type
                 extracted_text = None
                 if filename.endswith(".pdf"):
                     extracted_text = extract_text_from_pdf(filepath)
@@ -108,45 +157,39 @@ def upload_file():
                     return jsonify({"error": f"Unsupported file type: {filename}"}), 400
 
                 if not extracted_text.strip():
-                    print(f"❌ No text extracted from {filename}. Skipping embedding generation.")
-                    continue  # Skip instead of returning an error for one bad file
+                    continue
 
-                # Generate summary before storing
+                # ✅ Generate summary
                 summary = generate_summary(extracted_text)
+                print(f"📄 Summary generated: {summary}")
 
-                # Store extracted data in JSON format
+                # ✅ Generate embeddings
+                embeddings = generate_embeddings(extracted_text)
+                if embeddings is None:
+                    print(f"❌ Error: Embeddings could not be generated for {filename}")
+                    continue  
+
+                # ✅ Store embeddings in Pinecone
+                index.upsert(vectors=[(filename, embeddings, {"text": extracted_text})])
+
+                # ✅ Store extracted data
                 doc_data = {
                     "file_name": filename,
                     "date_uploaded": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "extracted_text": extracted_text,
-                    "summary": summary,  # Store summary with extracted data
+                    "summary": summary,
                     "metadata": {
                         "file_type": filename.split(".")[-1],
                         "file_size": os.path.getsize(filepath)
                     }
                 }
                 json_data.append(doc_data)
-
-                # Append summary to the response
                 summaries.append({"filename": filename, "summary": summary})
                 uploaded_files.append(filename)
 
-        # Save extracted data to JSON file
+        # ✅ Save extracted data to JSON file
         with open(app.config['PROCESSED_JSON'], "w", encoding="utf-8") as json_file:
             json.dump(json_data, json_file, ensure_ascii=False, indent=4)
-
-        # Store document embeddings in Pinecone
-        for doc in json_data:
-            filename = doc["file_name"]
-            extracted_text = doc["extracted_text"]
-            embeddings = generate_embeddings(extracted_text)
-
-            if embeddings is None:
-                print(f"❌ Error: Embeddings could not be generated for {filename}")
-                continue  # Skip instead of failing the entire process
-
-            print(f"✅ Upserting embeddings for {filename} with {len(embeddings)} dimensions")
-            index.upsert(vectors=[(filename, embeddings, {"text": extracted_text})])
 
         if not uploaded_files:
             return jsonify({"error": "No valid files uploaded"}), 400
@@ -154,56 +197,51 @@ def upload_file():
         return jsonify({"message": "Files uploaded successfully", "files": uploaded_files, "summaries": summaries}), 200
 
     except Exception as e:
-        print(f"❌ Error in upload_file: {e}")
         return jsonify({"error": str(e)}), 500
+    print(f"📂 Extracted Text: {extracted_text[:500]}")  # Debug: Print first 500 chars
 
+
+# ✅ Ask Question (Protected)
 @app.route('/ask', methods=['POST'])
 def ask_question():
+    if "user" not in session:
+        return jsonify({"error": "Unauthorized access. Please log in."}), 403
+
     try:
         data = request.json
         question = data.get('question')
+
         if not question:
             return jsonify({"error": "Question is required"}), 400
 
-        # Generate query embeddings
-        query_embedding = generate_embeddings(question)
+        print(f"🔍 Received Question: {question}")  # Debug print
 
-        if query_embedding is None:
-            return jsonify({"error": "Failed to generate embeddings for the question"}), 500
+        # ✅ Load extracted text from JSON storage
+        with open(app.config['PROCESSED_JSON'], "r", encoding="utf-8") as f:
+            stored_data = json.load(f)
 
-        print(f"🔍 Querying Pinecone index with question: {question}")
-        results = index.query(vector=[query_embedding], top_k=10, include_metadata=True)
+        # ✅ Combine all extracted document texts
+        combined_text = "\n\n".join([doc["extracted_text"][:1000] for doc in stored_data])
 
-        if not results or "matches" not in results or len(results["matches"]) == 0:
-            return jsonify({"error": "No relevant documents found"}), 404
+        # ✅ If no document data, fallback to general AI response
+        if not combined_text.strip():
+            combined_text = "No document found. Use general knowledge."
 
-        # Filter only highly relevant documents (score > 0.75)
-        filtered_docs = [
-            {"filename": match["id"], "text": match["metadata"]["text"], "score": match["score"]}
-            for match in results["matches"]
-            if match["score"] > 0.75
-        ]
+        print(f"📄 Context Sent to AI: {combined_text[:500]}")  # Debugging
 
-        if not filtered_docs:
-            return jsonify({"error": "No highly relevant documents found"}), 404
-
-        # Combine relevant text
-        combined_text = "\n\n".join([doc["text"][:1000] for doc in filtered_docs])
-
-        # Use GPT-4 to generate an answer based on retrieved documents
+        # ✅ Call OpenAI with extracted document text
         answer = answer_question(question, combined_text)
 
-        return jsonify({
-            "answer": answer,
-            "references": [
-                {"filename": doc["filename"], "score": round(doc["score"], 2)}
-                for doc in filtered_docs
-            ]
-        }), 200
+        print(f"✅ AI Answer: {answer}")  # Debug print
+
+        return jsonify({"answer": answer}), 200
 
     except Exception as e:
-        print(f"❌ Error in ask_question: {e}")
+        print(f"❌ Error in ask_question: {e}")  # Debug error print
         return jsonify({"error": str(e)}), 500
+
+
+
 
 if __name__ == '__main__':
     app.run(debug=True)
